@@ -5,12 +5,13 @@ description: >-
   asks to hand a task off - to Cursor, Grok, DeepSeek, dsh, DeepSeek Harness or "a worker"
   (e.g. "派给 cursor", "交给 deepseek", "让 dsh 跑", "派活", "ask DeepSeek") - delegate it to the
   claude-workers:worker subagent (claude-workers:deepseek when DeepSeek is named), or call worker_run directly for a
-  one-off question. When the user does not ask for a hand-off, do the work with the current model.
+  one-off question. When the user does not ask for a hand-off, do the work with the current model,
+  unless the user's own instructions (CLAUDE.md) say to offer one first.
 ---
 
 # Worker routing
 
-- **The user did not ask to hand the work off** → do the work yourself with the current model. Do not suggest or ask about models and do not dispatch.
+- **The user did not ask to hand the work off** → do the work yourself with the current model and do not dispatch. Do not suggest or ask about models either, unless the user's own instructions (CLAUDE.md) say to offer a hand-off for that kind of task: then ask once, and follow the answer.
 - **The user asked to hand it off** →
   - implementation, debugging, refactoring, bounded research: use the Agent tool with `subagent_type: "claude-workers:worker"`, or `"claude-workers:deepseek"` when the user named DeepSeek / dsh. Give it the absolute project directory, a self-contained brief (it does not see this conversation) and the engine or model the user named, if any. Independent pieces can go to several subagents in parallel, each in its own directory or git worktree.
   - a quick question or web lookup: call `worker_run` directly, with a scratch directory as `cwd`.

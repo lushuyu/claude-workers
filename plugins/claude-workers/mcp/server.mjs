@@ -60,7 +60,7 @@ import zlib from 'node:zlib';
 import { AcpAgent } from './acp.mjs';
 import { CodexServer, usageLine } from './codex.mjs';
 
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 // Names from before the rename (DSH_MCP_*, ~/.dsh-mcp, ~/.cursor/dsh-mcp) keep working.
 for (const [k, v] of Object.entries(process.env)) if (k.startsWith('DSH_MCP_')) process.env[`CLAUDE_WORKERS_${k.slice(8)}`] ??= v;
 const legacyDir = (now, old) => (!fs.existsSync(now) && fs.existsSync(old) ? old : now);
