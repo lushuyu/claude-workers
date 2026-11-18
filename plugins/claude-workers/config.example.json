@@ -5,6 +5,7 @@
     "codex": { "model": "gpt-5.5", "effort": "high", "sandbox": "workspace-write", "approval": "on-request", "approvals": "self" },
     "opencode": { "model": "soclaas/x-test-2" },
     "my-agent": { "type": "acp", "command": "my-agent", "args": ["acp"], "env": {}, "model": "provider/model", "options": {} },
+    "t3": { "type": "t3", "ssh": "my-server", "provider": "codex", "model": "gpt-5.5" },
     "cursor": { "disabled": true }
   }
 }

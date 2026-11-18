@@ -60,7 +60,7 @@ import zlib from 'node:zlib';
 import { AcpAgent } from './acp.mjs';
 import { CodexServer, usageLine } from './codex.mjs';
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 // Names from before the rename (DSH_MCP_*, ~/.dsh-mcp, ~/.cursor/dsh-mcp) keep working.
 for (const [k, v] of Object.entries(process.env)) if (k.startsWith('DSH_MCP_')) process.env[`CLAUDE_WORKERS_${k.slice(8)}`] ??= v;
 const legacyDir = (now, old) => (!fs.existsSync(now) && fs.existsSync(old) ? old : now);
@@ -737,7 +737,8 @@ function afterCursorJob(job) {
 // review); everything else always asks Claude. Default: "self" for Codex on a ChatGPT
 // subscription login, "claude" for the rest.
 // A harness with no "model" uses whatever model the harness itself defaults to.
-// Types: dsh (DeepSeek Harness: acp | web | headless runners), acp (any ACP agent on stdio),
+//       "t3":       { "type": "t3", "ssh": "my-server", "provider": "codex", "model": "gpt-5.5" }
+// Types: t3 (a T3 Code server's threads through its `t3 thread` CLI, here or over SSH), dsh (DeepSeek Harness: acp | web | headless runners), acp (any ACP agent on stdio),
 // codex (the Codex app-server), cursor (the Cursor CLI). The four built-ins below need no entry.
 let configCache = { mtime: -1, value: {} };
 function loadConfig() {
@@ -813,6 +814,7 @@ function opencodeEnv(h, env) {
 function harnessMissing(h) {
   if (h.type === 'cursor') return cursorCommand() ? null : 'the Cursor CLI is not installed on this host';
   if (h.type === 'dsh') return null;
+  if (h.type === 't3') return h.ssh || t3Local(h) ? null : '`t3` is not installed on this host (set "ssh" or "command" for this harness)';
   return launchSpec(h) ? null : `\`${h.command ?? 'codex'}\` is not installed on this host`;
 }
 
@@ -1006,6 +1008,100 @@ async function startCodexJob(name, h, { task, cwd, session_id, model }, why) {
   return job;
 }
 
+// ---------------------------------------------------------------- T3 Code runner
+// A T3 Code server's threads through its own CLI (`t3 thread start | send | show`), on this host
+// or over SSH on the host that runs the server ("ssh": an ssh host name). The task becomes a
+// thread in T3, visible and steerable there; this side polls it for the agent's messages. The
+// CLI shows messages, not tool calls, and cannot interrupt a thread or answer its requests.
+const shq = (v) => (String(v).startsWith('~/')
+  ? `"$HOME/${String(v).slice(2).replace(/(["$`\\])/g, '\\$1')}"`
+  : `'${String(v).replace(/'/g, `'\\''`)}'`);
+// The local t3: the configured command, one on PATH, or the newest runtime a T3 Code server installed.
+function t3Local(h) {
+  if (h.command) return onPath(h.command.startsWith('~/') ? path.join(os.homedir(), h.command.slice(2)) : h.command);
+  const dir = path.join(os.homedir(), '.t3', 'runtime', 'versions');
+  const key = (v) => v.split('.').map((n) => n.padStart(6, '0')).join('.');
+  const newest = safeReaddir(dir).sort((a, b) => key(b).localeCompare(key(a)))
+    .map((v) => path.join(dir, v, isWin ? 't3.exe' : 't3')).find((p) => fs.existsSync(p));
+  return onPath('t3') ?? newest ?? null;
+}
+function t3Exec(h, args, input) {
+  let cmd, argv;
+  if (h.ssh) {
+    const find = h.command ? `T=${shq(h.command)}` : 'T=$(command -v t3 || ls -d "$HOME"/.t3/runtime/versions/*/t3 2>/dev/null | sort -V | tail -1)';
+    cmd = 'ssh'; argv = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', h.ssh, `${find}; "$T" ${args.map(shq).join(' ')}`];
+  } else { cmd = t3Local(h) ?? h.command ?? 't3'; argv = args; }
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(cmd, argv, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); } catch (e) { return resolve({ code: -1, out: '', err: e.message, j: null }); }
+    let out = '', err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
+    child.on('error', (e) => resolve({ code: -1, out, err: e.message, j: null }));
+    child.on('close', (code) => { let j = null; try { j = JSON.parse(out.trim().split('\n').pop()); } catch {} resolve({ code, out, err, j }); });
+    child.stdin.on('error', () => {});
+    child.stdin.end(input ?? '');
+  });
+}
+async function startT3Job(name, h, { task, cwd, session_id, model }, why) {
+  const job = newJob('t3', cwd, task);
+  Object.assign(job, { harness: name, harnessType: 't3', routing: why, t3: { host: h.ssh ?? 'this host' }, notes: [] });
+  const base = h.baseDir ? ['--base-dir', h.baseDir] : [];
+  // model: "provider/model" (the provider is T3's provider instance id), or just a model for the configured provider
+  let provider = h.provider, mdl = h.model;
+  if (model) { const i = model.indexOf('/'); if (i > 0) { provider = model.slice(0, i); mdl = model.slice(i + 1); } else mdl = model; }
+  const said = (r) => (r.out.trim() || r.err.trim() || `exit ${r.code}`).split('\n').slice(-4).join(' | ').slice(0, 600);
+  let r;
+  if (session_id) r = await t3Exec(h, ['thread', 'send', '--json', ...base, session_id, '-'], task);
+  else {
+    const title = task.trim().split('\n')[0].slice(0, 80);
+    const args = ['thread', 'start', '--json', ...base, ...(provider ? ['--provider', provider] : []), ...(mdl ? ['--model', mdl] : []), '--title', title, cwd, '-'];
+    r = await t3Exec(h, args, task);
+    if (!r.j?.threadId && /No T3 Code project matches/i.test(r.out + r.err) && h.addProject !== false) {
+      const a = await t3Exec(h, ['project', 'add', ...base, cwd]);
+      if (a.code !== 0) { finish(job, 'failed', `T3 has no project at ${cwd}, and adding one failed: ${said(a)}`); return job; }
+      job.notes.push(`added ${cwd} to T3 as a project`);
+      r = await t3Exec(h, args, task);
+    }
+  }
+  const threadId = r.j?.threadId ?? (r.code === 0 ? session_id : null);
+  if (!threadId) { finish(job, 'failed', `T3: ${said(r)}`); return job; }
+  job.sessionId = threadId; job.runId = r.j?.runId ?? null;
+  rememberSession(threadId, name, 't3');
+  job.cancel = () => { job.errors.push(`T3's CLI cannot interrupt a thread: it may still be running. Stop it in T3${job.t3.link ? ` (${job.t3.link})` : ''}.`); };
+  let shown = 0, lost = 0, askedOnce = false;
+  const tick = async () => {
+    if (job.status !== 'running') return;
+    const s = await t3Exec(h, ['thread', 'show', '--json', '--messages', '30', ...base, threadId]);
+    if (job.status !== 'running') return;
+    const t = s.j?.thread;
+    if (!t) { if (++lost >= 8) finish(job, 'failed', `lost the T3 server: ${said(s)}`); }
+    else {
+      lost = 0;
+      job.runId ??= t.activeRunId ?? t.latestRunId;
+      Object.assign(job.t3, { status: t.status, link: t.link, mode: t.runtimeMode, pending: t.pendingRequestCount });
+      job.model = `${t.providerInstanceId}/${t.model}`;
+      const done = t.activeRunId == null && t.latestRunId === job.runId;
+      const mine = (s.j.messages || []).filter((m) => m.role === 'assistant' && m.runId === job.runId && m.text?.trim());
+      // The last message may still be growing: show it once another follows or the run is over.
+      for (const end = done ? mine.length : mine.length - 1; shown < end; shown++) {
+        job.lastText = mine[shown].text.trim();
+        for (const l of job.lastText.split('\n')) if (l.trim()) emit(job, `» ${l.trimEnd()}`);
+      }
+      if (t.pendingRequestCount > 0 && !askedOnce) { askedOnce = true; emit(job, `T3 is waiting for an answer or approval on this thread: answer it in T3 (${t.link})`); }
+      if (done) {
+        job.final = mine.length ? mine[mine.length - 1].text.trim() : null;
+        if (t.status === 'completed' && job.final) finish(job, 'completed');
+        else finish(job, 'failed', t.status === 'completed' ? 'the T3 run ended without a message: treat the task as unfinished' : `the T3 thread ended as: ${t.status}`);
+        return;
+      }
+    }
+    job.timer = setTimeout(tick, h.ssh ? 4000 : 2000);
+  };
+  job.timer = setTimeout(tick, 1500);
+  return job;
+}
+
 // ---------------------------------------------------------------- job control
 async function stopJob(job, why) {
   if (job.status !== 'running') return;
@@ -1061,27 +1157,33 @@ function waitFor(job, seconds, onActivity) {
 
 function report(job) {
   const secs = Math.round(((job.endedAt || Date.now()) - job.startedAt) / 1000);
-  const cursor = job.runner === 'cursor', codex = job.runner === 'codex', acp = job.runner === 'acp';
-  const dsh = !cursor && !codex && (!acp || job.harnessType === 'dsh');
-  const who = cursor ? 'Cursor' : codex ? 'Codex' : dsh ? 'DeepSeek' : job.harness;
-  const where = cursor ? 'Cursor CLI, headless (continue the chat with worker_run session_id)'
+  const cursor = job.runner === 'cursor', codex = job.runner === 'codex', acp = job.runner === 'acp', t3 = job.runner === 't3';
+  const dsh = !cursor && !codex && !t3 && (!acp || job.harnessType === 'dsh');
+  const who = cursor ? 'Cursor' : codex ? 'Codex' : dsh ? 'DeepSeek' : t3 ? 'T3' : job.harness;
+  const where = t3 ? `T3 Code on ${job.t3.host}: a thread there${job.t3.link ? ` (${job.t3.link})` : ''}; its agent messages are polled, tool calls are not shown (continue with worker_run session_id)`
+    : cursor ? 'Cursor CLI, headless (continue the chat with worker_run session_id)'
     : codex ? 'Codex app-server, streamed (continue the thread with worker_run session_id)'
       : acp ? `ACP, streamed from a long-lived ${dsh ? 'dsh' : job.harness} agent process (continue with worker_run session_id)`
         : job.runner === 'web' ? `web instance (live in ${webUi}, workspace "${job.workspace}")`
           : `headless (the session appears under 未分组 in ${webUi}, not live)`;
   const lines = [
     `status: ${job.status}${job.exitCode != null ? ` (exit ${job.exitCode})` : ''}, ${secs}s`,
-    `engine: ${dsh ? 'DeepSeek (dsh)' : acp ? `${job.harness} (ACP)` : who}${job.routing ? ` (${job.routing})` : ''}`,
+    `engine: ${dsh ? 'DeepSeek (dsh)' : acp ? `${job.harness} (ACP)` : t3 ? `${job.harness} (T3 Code)` : who}${job.routing ? ` (${job.routing})` : ''}`,
     `job: ${job.id} | session: ${job.sessionId || '(not yet)'} | cwd: ${job.cwd}`,
     `runner: ${where}`,
-    `permission: ${cursor ? 'Cursor auto-review: safe tool calls run, the rest are refused (listed under BLOCKED)'
+    `permission: ${t3 ? `T3 runtime mode ${job.t3.mode ?? '(not known yet)'}: T3 decides what runs; a request it raises is answered in T3, not with worker_approve`
+      : cursor ? 'Cursor auto-review: safe tool calls run, the rest are refused (listed under BLOCKED)'
       : codex ? job.permission ?? '(not set yet)'
         : acp ? (dsh ? 'dsh acp profile: workspace-write sandbox; a call that needs approval returns as APPROVAL NEEDED (no reviewer model on this runner)'
           : job.harness === 'opencode' ? 'OpenCode: edits inside the project run; shell commands other than read-only ones, and anything outside the project, return as APPROVAL NEEDED'
             : `${job.harness}'s own settings; its permission requests return as APPROVAL NEEDED`)
           : job.runner === 'web' ? job.permission ?? '(not set yet)' : 'headless default (Auto review needs the web instance)'}`,
   ];
-  if (codex) {
+  if (t3) {
+    if (job.model) lines.push(`model: ${job.model}`);
+    for (const n of job.notes) lines.push(`note: ${n}`);
+    if (job.t3.pending) lines.push(`WAITING FOR THE USER: T3 has ${job.t3.pending} pending request(s) on this thread; answer in T3${job.t3.link ? ` (${job.t3.link})` : ''}`);
+  } else if (codex) {
     if (job.model) lines.push(`model: ${job.model}`);
     const u = job.usage;
     if (u) lines.push(`tokens: in ${u.inputTokens ?? 0} (cached ${u.cachedInputTokens ?? 0}), out ${u.outputTokens ?? 0} (reasoning ${u.reasoningOutputTokens ?? 0})`);
@@ -1134,7 +1236,7 @@ function report(job) {
 // The harnesses usable on this host, as the tool descriptions list them.
 function engineList() {
   return Object.entries(harnesses()).filter(([, h]) => !harnessMissing(h)).map(([name, h]) => {
-    const kind = h.type === 'cursor' ? 'Cursor CLI' : h.type === 'codex' ? 'Codex, streamed' : h.type === 'dsh' ? 'DeepSeek Harness, streamed' : 'ACP agent, streamed';
+    const kind = h.type === 't3' ? `T3 Code thread${h.ssh ? ` on ${h.ssh}` : ''}${h.provider ? `, provider ${h.provider}` : ''}` : h.type === 'cursor' ? 'Cursor CLI' : h.type === 'codex' ? 'Codex, streamed' : h.type === 'dsh' ? 'DeepSeek Harness, streamed' : 'ACP agent, streamed';
     return `${name} (${kind}${h.model ? `, model ${h.model}` : ''})`;
   });
 }
@@ -1288,8 +1390,6 @@ async function callTool(name, args, progress, bind) {
   const wait = (v) => Math.min(3000, Math.max(1, Number(v) || defaultWait));
   if (name === 'worker_run') {
     if (typeof args.task !== 'string' || !args.task.trim()) return text('task is required', true);
-    const bad = checkCwd(args.cwd);
-    if (bad) return text(bad, true);
     const hs = harnesses();
     const model = args.model || hs.cursor?.model || CURSOR_MODEL;
     // A session continues on the harness that owns it: recorded when it was started, else told
@@ -1300,12 +1400,17 @@ async function callTool(name, args, progress, bind) {
     const want = args.engine || owner || fallback;
     if (want !== 'auto' && !hs[want]) return text(`unknown engine "${want}". Configured here: auto, ${Object.keys(hs).join(', ')} (harnesses are set in ${CONFIG_FILE})`, true);
     const h = hs[want];
+    const bad = h?.type === 't3' && h.ssh
+      ? (typeof args.cwd === 'string' && /^(\/|~\/)/.test(args.cwd) ? null : `cwd must be an absolute path on ${h.ssh} (the T3 host)`)
+      : checkCwd(args.cwd);
+    if (bad) return text(bad, true);
     const why = args.engine ? `${want} as asked` : owner ? `continuing a ${owner} session` : `the default engine is ${want}`;
     let job;
     if (h && h.type !== 'cursor') {
       const missing = harnessMissing(h);
       if (missing) return text(`${want} cannot take this task: ${missing}`, true);
       job = h.type === 'dsh' ? await startDeepseekJob(args, why, h)
+        : h.type === 't3' ? await startT3Job(want, h, args, why)
         : h.type === 'codex' ? await startCodexJob(want, h, args, why)
           : await startAcpJob(want, h, args, why);
     } else {

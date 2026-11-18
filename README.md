@@ -15,7 +15,8 @@ Claude ──MCP──> claude-workers ──ACP───────> dsh --pro
                         ├─ACP──────────────> opencode acp        (any provider OpenCode has)
                         ├─ACP──────────────> your own agent
                         ├─app-server───────> codex app-server    (your Codex login; usage and credits)
-                        └─CLI──────────────> Cursor `agent -p`
+                        ├─CLI──────────────> Cursor `agent -p`
+                        └─CLI (or SSH)─────> t3 thread           (a T3 Code server: the task becomes a thread there)
 ```
 
 ## What you get
@@ -103,6 +104,9 @@ overrides their fields. See [config.example.json](plugins/claude-workers/config.
 - `deepseek`: `runner` = `acp` (default) | `web` | `headless`.
 - `codex`: `sandbox`, `approval`. Unset fields follow `~/.codex/config.toml`.
 - `opencode`: `permission` replaces the OpenCode permission set described below.
+- `t3` type: `ssh` (an ssh host that runs the T3 Code server; omit when it runs on this host), `provider` and
+  `model` (T3's provider instance id and model slug), `command` (path to `t3`), `baseDir`,
+  `addProject` (`false` to refuse adding `cwd` to T3 as a project when it is not one yet).
 - `webUi`: the address where you open your dsh web instance, shown in reports of the web runner.
 
 A model name is matched against what the harness offers (`soclaas/x-test-2` matches dsh's
@@ -134,6 +138,21 @@ What triggers a request differs by harness:
 - **OpenCode** has no sandbox and by default runs everything unasked. This server therefore
   starts it with `OPENCODE_PERMISSION`: edits inside the project and read-only shell commands
   run; every other shell command, and anything outside the project, asks.
+
+### T3 Code
+
+A `t3` harness hands the task to a [T3 Code](https://github.com/pingdotgg/t3code) server instead of
+running an agent itself: `worker_run(engine: "t3")` starts a thread there with `t3 thread start`,
+follows it with `t3 thread show`, and continues it with `t3 thread send`. `cwd` is a path on the T3
+host; `model` may be given as `provider/model` (for example `claudeAgent/claude-sonnet-5-5`).
+
+- No credentials are involved: the CLI talks to the server on its own host. Over SSH, your ssh
+  config and agent do the authentication.
+- T3's CLI reports agent messages, not tool calls, so the activity list has text only.
+- A thread started this way runs in T3's own runtime mode (full access by default). Requests it
+  raises are answered in T3; `worker_approve` does not apply. `worker_cancel` stops watching, but
+  the CLI cannot interrupt the thread.
+- Queues, forks, child agents and the rest of T3's orchestration stay in T3's own MCP server and UI.
 
 ## Caveats
 
