@@ -60,7 +60,7 @@ import zlib from 'node:zlib';
 import { AcpAgent } from './acp.mjs';
 import { CodexServer, usageLine } from './codex.mjs';
 
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 // Names from before the rename (DSH_MCP_*, ~/.dsh-mcp, ~/.cursor/dsh-mcp) keep working.
 for (const [k, v] of Object.entries(process.env)) if (k.startsWith('DSH_MCP_')) process.env[`CLAUDE_WORKERS_${k.slice(8)}`] ??= v;
 const legacyDir = (now, old) => (!fs.existsSync(now) && fs.existsSync(old) ? old : now);
@@ -1016,24 +1016,32 @@ async function startCodexJob(name, h, { task, cwd, session_id, model }, why) {
 const shq = (v) => (String(v).startsWith('~/')
   ? `"$HOME/${String(v).slice(2).replace(/(["$`\\])/g, '\\$1')}"`
   : `'${String(v).replace(/'/g, `'\\''`)}'`);
-// The local t3: the configured command, one on PATH, or the newest runtime a T3 Code server installed.
+// The local t3 as { cmd, pre, env }: the configured command (with "args" and "env"), one on PATH,
+// the newest runtime a T3 Code server installed, or on Windows the desktop app's bundled CLI,
+// read out of the launcher it writes (~/.t3/bin/t3.cmd) so no cmd.exe quoting is involved.
 function t3Local(h) {
-  if (h.command) return onPath(h.command.startsWith('~/') ? path.join(os.homedir(), h.command.slice(2)) : h.command);
+  const home = (p) => (p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
+  if (h.command) { const c = onPath(home(h.command)); return c ? { cmd: c, pre: h.args ?? [], env: h.env ?? {} } : null; }
+  const onpath = onPath('t3');
+  if (onpath && !/\.(cmd|bat)$/i.test(onpath)) return { cmd: onpath, pre: [], env: {} };
+  if (isWin) {
+    const m = /^"([^"]+\.exe)"\s+"([^"]+)"\s+%\*/m.exec(safeRead(path.join(os.homedir(), '.t3', 'bin', 't3.cmd')));
+    return m && fs.existsSync(m[1]) ? { cmd: m[1], pre: [m[2]], env: { ELECTRON_RUN_AS_NODE: '1', T3CODE_HOME: process.env.T3CODE_HOME || path.join(os.homedir(), '.t3'), T3CODE_DESKTOP_CLI_LAUNCHER: '1' } } : null;
+  }
   const dir = path.join(os.homedir(), '.t3', 'runtime', 'versions');
   const key = (v) => v.split('.').map((n) => n.padStart(6, '0')).join('.');
-  const newest = safeReaddir(dir).sort((a, b) => key(b).localeCompare(key(a)))
-    .map((v) => path.join(dir, v, isWin ? 't3.exe' : 't3')).find((p) => fs.existsSync(p));
-  return onPath('t3') ?? newest ?? null;
+  const newest = safeReaddir(dir).sort((x, y) => key(y).localeCompare(key(x))).map((v) => path.join(dir, v, 't3')).find((p) => fs.existsSync(p));
+  return newest ? { cmd: newest, pre: [], env: {} } : null;
 }
 function t3Exec(h, args, input) {
-  let cmd, argv;
+  let cmd, argv, env = {};
   if (h.ssh) {
     const find = h.command ? `T=${shq(h.command)}` : 'T=$(command -v t3 || ls -d "$HOME"/.t3/runtime/versions/*/t3 2>/dev/null | sort -V | tail -1)';
     cmd = 'ssh'; argv = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', h.ssh, `${find}; "$T" ${args.map(shq).join(' ')}`];
-  } else { cmd = t3Local(h) ?? h.command ?? 't3'; argv = args; }
+  } else { const l = t3Local(h) ?? { cmd: h.command ?? 't3', pre: [], env: {} }; cmd = l.cmd; argv = [...l.pre, ...args]; env = l.env; }
   return new Promise((resolve) => {
     let child;
-    try { child = spawn(cmd, argv, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); } catch (e) { return resolve({ code: -1, out: '', err: e.message, j: null }); }
+    try { child = spawn(cmd, argv, { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); } catch (e) { return resolve({ code: -1, out: '', err: e.message, j: null }); }
     let out = '', err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
