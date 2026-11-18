@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Hands an implementation, debugging or research task to a worker agent and reviews what it did. The worker is Cursor (Cursor CLI, Auto model) while the Cursor plan has 30%+ of its quota left, DeepSeek (V4.1 Flash via DeepSeek Harness / dsh, unlimited, with web search) otherwise. Use ONLY when the user asks to hand the work off (to Cursor, DeepSeek, dsh or "a worker"); otherwise do the work with the current model. Brief it like a contractor who has not seen the conversation - the goal, the absolute project directory, which files it may and may not touch, how to check the result, and which engine the user named, if any.
+description: Hands an implementation, debugging or research task to a worker agent and reviews what it did. The worker is Cursor (Cursor CLI, Auto model) while the Cursor plan has 30%+ of its quota left, DeepSeek Harness (dsh, with the model configured for it) otherwise. Use ONLY when the user asks to hand the work off (to Cursor, DeepSeek, dsh or "a worker"); otherwise do the work with the current model. Brief it like a contractor who has not seen the conversation - the goal, the absolute project directory, which files it may and may not touch, how to check the result, and which engine the user named, if any.
 model: sonnet
 color: blue
 ---

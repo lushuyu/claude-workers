@@ -1,9 +1,11 @@
 # dsh: worker harnesses for Claude, over MCP
 
 Let Claude Code (or any MCP client) hand a task to another coding agent, watch it work, answer
-its approval requests and read its plan usage. Built for running SoCLaaS models through
-DeepSeek Harness or OpenCode from inside Claude, and it works the same way for Codex, Cursor and
-any agent that speaks the Agent Client Protocol (ACP).
+its approval requests and read its plan usage. It drives DeepSeek Harness, OpenCode, Codex,
+Cursor and any agent that speaks the Agent Client Protocol (ACP).
+
+It is not tied to a model provider. Providers (SoCLaaS, DeepSeek, OpenAI, ...) are configured
+in the harness; here you only name the model the harness should use.
 
 Claude itself is left alone: no gateway, no `ANTHROPIC_BASE_URL`, no translation proxy. Your
 Claude subscription, Remote Control and the desktop and mobile apps keep working as they do.
@@ -96,7 +98,7 @@ overrides their fields. See [config.example.json](plugins/dsh/config.example.jso
 
 - `default`: the engine used when `dsh_run` names none. `auto` (the built-in default) means
   Cursor while its plan has quota left, DeepSeek otherwise.
-- Per harness: `model`, `effort`, `approvals`, `disabled`. For your own: `type` (`acp`), `command`,
+- Per harness: `model` (unset: the harness's own default model), `effort`, `approvals`, `disabled`. For your own: `type` (`acp`), `command`,
   `args`, `env`, and `options` (ACP config options by id).
 - `deepseek`: `runner` = `acp` (default) | `web` | `headless`.
 - `codex`: `sandbox`, `approval`. Unset fields follow `~/.codex/config.toml`.

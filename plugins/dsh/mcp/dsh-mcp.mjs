@@ -731,6 +731,7 @@ function afterCursorJob(job) {
 // harnesses that have a reviewer can be "self": Codex (auto-review) and dsh's web runner (Auto
 // review); everything else always asks Claude. Default: "self" for Codex on a ChatGPT
 // subscription login, "claude" for the rest.
+// A harness with no "model" uses whatever model the harness itself defaults to.
 // Types: dsh (DeepSeek Harness: acp | web | headless runners), acp (any ACP agent on stdio),
 // codex (the Codex app-server), cursor (the Cursor CLI). The four built-ins below need no entry.
 const STATE_DIR = path.join(os.homedir(), '.dsh-mcp');
@@ -749,7 +750,7 @@ function harnesses() {
   const user = loadConfig().harnesses ?? {};
   const base = {
     cursor: { type: 'cursor', model: CURSOR_MODEL },
-    deepseek: { type: 'dsh', runner: process.env.DSH_MCP_RUNNER || 'auto', model: process.env.DSH_MCP_MODEL || 'soclaas/x-test-2', effort: EFFORT },
+    deepseek: { type: 'dsh', runner: process.env.DSH_MCP_RUNNER || 'auto', model: process.env.DSH_MCP_MODEL || undefined, effort: EFFORT },
     codex: { type: 'codex' },
     opencode: { type: 'acp', command: 'opencode', args: ['acp'] },
   };
@@ -1138,7 +1139,7 @@ const tools = () => [
   {
     name: 'dsh_run',
     description: 'Hand a coding/research task to a worker agent and get its result. engine=auto (default) uses Cursor (the Cursor CLI in its Auto model mode) '
-      + `while the Cursor plan keeps at least ${CURSOR_MIN_LEFT}% of its pool, and DeepSeek otherwise (DeepSeek V4.1 Flash via DeepSeek Harness on SoCLaaS; unlimited, has web search); `
+      + `while the Cursor plan keeps at least ${CURSOR_MIN_LEFT}% of its pool, and DeepSeek Harness otherwise (with the model configured for it); `
       + `engine=<name> forces one of the configured harnesses: ${engineList().join('; ')}. The result says which engine ran and why. `
       + 'While the worker runs, its text and tool calls are streamed as progress, and every report lists the activity since the previous one. '
       + 'Codex and ACP harnesses pause on a call that needs approval the same way DeepSeek does (APPROVAL NEEDED, answered with dsh_approve). '
@@ -1210,7 +1211,7 @@ const tools = () => [
     name: 'dsh_usage',
     description: 'Plan usage of the worker harnesses: for Codex on a ChatGPT subscription the rate-limit windows (5h, weekly: percent used, reset time), the remaining credit balance '
       + 'and the rate-limit reset credits, read live from the Codex app-server; for Cursor the plan pools (refresh=true re-reads them, which takes about half a minute). '
-      + 'Harnesses without a plan quota (DeepSeek on SoCLaaS, other ACP agents) are listed with their model.',
+      + 'Harnesses without a plan quota (DeepSeek Harness, other ACP agents) are listed with their model.',
     inputSchema: { type: 'object', properties: { refresh: { type: 'boolean', description: 'Also re-read the Cursor quota (slow).' } }, additionalProperties: false },
     annotations: { title: 'Worker plan usage', readOnlyHint: true, openWorldHint: true },
   },

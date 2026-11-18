@@ -1,6 +1,6 @@
 ---
 name: deepseek
-description: Hands an implementation, debugging or research task to DeepSeek specifically (DeepSeek V4.1 Flash through DeepSeek Harness / dsh, unlimited, with web search) and reviews what it did. Use ONLY when the user names DeepSeek or dsh for the task; for a hand-off without a named engine use dsh:worker (Cursor while its quota lasts). Brief it like a contractor who has not seen the conversation - the goal, the absolute project directory, which files it may and may not touch, and how to check the result.
+description: Hands an implementation, debugging or research task to DeepSeek specifically (DeepSeek Harness / dsh, with the model configured for it) and reviews what it did. Use ONLY when the user names DeepSeek or dsh for the task; for a hand-off without a named engine use dsh:worker (Cursor while its quota lasts). Brief it like a contractor who has not seen the conversation - the goal, the absolute project directory, which files it may and may not touch, and how to check the result.
 model: sonnet
 color: blue
 ---
