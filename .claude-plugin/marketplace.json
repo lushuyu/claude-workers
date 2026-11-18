@@ -1,0 +1,12 @@
+{
+  "name": "shuyu-dsh",
+  "owner": { "name": "lushuyu" },
+  "description": "Worker harnesses for Claude over MCP: DeepSeek Harness, Codex, OpenCode, Cursor and any ACP agent",
+  "plugins": [
+    {
+      "name": "dsh",
+      "source": "./plugins/dsh",
+      "description": "Hand tasks to DeepSeek Harness (SoCLaaS and other models), Codex, OpenCode, Cursor or any ACP agent, streamed, with approvals and plan usage: MCP server, subagents, commands, routing skill"
+    }
+  ]
+}

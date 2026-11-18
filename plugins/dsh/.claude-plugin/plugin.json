@@ -1,0 +1,6 @@
+{
+  "name": "dsh",
+  "version": "0.6.0",
+  "description": "Worker agents for Claude Code, streamed: Cursor (CLI, Auto mode) while its plan has quota, DeepSeek through DeepSeek Harness otherwise, plus Codex, OpenCode and any ACP agent by name, with plan usage readout - worker/deepseek subagents, /worker /cursor /deepseek, a routing skill and an MCP server",
+  "author": { "name": "lushuyu" }
+}
