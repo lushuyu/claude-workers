@@ -1,4 +1,4 @@
-# dsh: worker harnesses for Claude, over MCP
+# claude-workers: worker harnesses for Claude, over MCP
 
 Let Claude Code (or any MCP client) hand a task to another coding agent, watch it work, answer
 its approval requests and read its plan usage. It drives DeepSeek Harness, OpenCode, Codex,
@@ -11,7 +11,7 @@ Claude itself is left alone: no gateway, no `ANTHROPIC_BASE_URL`, no translation
 Claude subscription, Remote Control and the desktop and mobile apps keep working as they do.
 
 ```
-Claude ──MCP──> dsh-mcp ──ACP──────────────> dsh --profile acp   (DeepSeek Harness: SoCLaaS, DeepSeek, ...)
+Claude ──MCP──> claude-workers ──ACP───────> dsh --profile acp   (DeepSeek Harness: SoCLaaS, DeepSeek, ...)
                         ├─ACP──────────────> opencode acp        (any provider OpenCode has)
                         ├─ACP──────────────> your own agent
                         ├─app-server───────> codex app-server    (your Codex login; usage and credits)
@@ -23,11 +23,11 @@ Claude ──MCP──> dsh-mcp ──ACP─────────────
 - **Streaming.** DeepSeek Harness, Codex and OpenCode run in long-lived processes, so a task
   starts without a cold boot. The worker's text and tool calls arrive as MCP progress
   notifications while it works, and every report lists the activity since the previous one.
-- **Several harnesses, one tool.** `dsh_run(engine: "deepseek" | "codex" | "opencode" | ...)`.
+- **Several harnesses, one tool.** `worker_run(engine: "deepseek" | "codex" | "opencode" | ...)`.
   Which model each harness uses is set in a config file, not in code.
 - **Approvals.** A tool call that needs a decision comes back to Claude as `APPROVAL NEEDED`
-  and is answered with `dsh_approve`, or is left to the harness's own reviewer where it has one.
-- **Plan usage.** `dsh_usage` shows Codex's rate-limit windows (5h, weekly), remaining credits
+  and is answered with `worker_approve`, or is left to the harness's own reviewer where it has one.
+- **Plan usage.** `worker_usage` shows Codex's rate-limit windows (5h, weekly), remaining credits
   and reset credits, and Cursor's plan pools.
 - **Sessions.** Every result carries a `session_id`; pass it back to continue the conversation.
 
@@ -49,8 +49,8 @@ but have had less testing.
 ### Claude Code (plugin: MCP server, subagents, slash commands, routing skill)
 
 ```
-/plugin marketplace add lushuyu/dsh-mcp
-/plugin install dsh@shuyu-dsh
+/plugin marketplace add lushuyu/claude-workers
+/plugin install claude-workers@claude-workers
 ```
 
 Then `/worker <task>`, `/deepseek <task>`, `/cursor [model] <task>`, or just ask Claude to hand a
@@ -61,7 +61,7 @@ task to DeepSeek / Codex / OpenCode.
 ```json
 {
   "mcpServers": {
-    "dsh": { "command": "node", "args": ["/path/to/repo/plugins/dsh/mcp/dsh-mcp.mjs"] }
+    "dsh": { "command": "node", "args": ["/path/to/repo/plugins/claude-workers/mcp/server.mjs"] }
   }
 }
 ```
@@ -70,18 +70,18 @@ task to DeepSeek / Codex / OpenCode.
 
 | Tool | What it does |
 | --- | --- |
-| `dsh_run(task, cwd, engine?, model?, session_id?, wait_seconds?)` | Run a task in `cwd`. Returns the final message, or a `job_id` when `wait_seconds` runs out. |
-| `dsh_wait(job_id)` | Keep waiting; reports what happened since the last report. |
-| `dsh_approve(job_id, decision)` | Answer an `APPROVAL NEEDED`: `allow` or `reject`. |
-| `dsh_cancel(job_id)` | Stop a task. Its session can be continued later. |
-| `dsh_jobs()` | Jobs of this server process. |
-| `dsh_usage(refresh?)` | Plan usage per harness. |
+| `worker_run(task, cwd, engine?, model?, session_id?, wait_seconds?)` | Run a task in `cwd`. Returns the final message, or a `job_id` when `wait_seconds` runs out. |
+| `worker_wait(job_id)` | Keep waiting; reports what happened since the last report. |
+| `worker_approve(job_id, decision)` | Answer an `APPROVAL NEEDED`: `allow` or `reject`. |
+| `worker_cancel(job_id)` | Stop a task. Its session can be continued later. |
+| `worker_jobs()` | Jobs of this server process. |
+| `worker_usage(refresh?)` | Plan usage per harness. |
 
 ## Configuration
 
-`~/.dsh-mcp/config.json` (or the file named by `DSH_MCP_CONFIG`). It is re-read when it changes.
+`~/.claude-workers/config.json` (or the file named by `CLAUDE_WORKERS_CONFIG`). It is re-read when it changes.
 The built-in harnesses (`deepseek`, `codex`, `opencode`, `cursor`) need no entry; an entry
-overrides their fields. See [config.example.json](plugins/dsh/config.example.json).
+overrides their fields. See [config.example.json](plugins/claude-workers/config.example.json).
 
 ```json
 {
@@ -96,7 +96,7 @@ overrides their fields. See [config.example.json](plugins/dsh/config.example.jso
 }
 ```
 
-- `default`: the engine used when `dsh_run` names none. `auto` (the built-in default) means
+- `default`: the engine used when `worker_run` names none. `auto` (the built-in default) means
   Cursor while its plan has quota left, DeepSeek otherwise.
 - Per harness: `model` (unset: the harness's own default model), `effort`, `approvals`, `disabled`. For your own: `type` (`acp`), `command`,
   `args`, `env`, and `options` (ACP config options by id).
@@ -146,11 +146,11 @@ What triggers a request differs by harness:
 ## Layout
 
 ```
-plugins/dsh/mcp/dsh-mcp.mjs     MCP server: tools, routing, reports, Cursor and dsh web/headless runners
-plugins/dsh/mcp/acp.mjs         ACP client
-plugins/dsh/mcp/codex.mjs       Codex app-server client and usage formatting
-plugins/dsh/mcp/stdio-rpc.mjs   JSON-RPC over a child process's stdio
-plugins/dsh/agents, commands, skills    Claude Code subagents, slash commands and the routing skill
+plugins/claude-workers/mcp/server.mjs     MCP server: tools, routing, reports, Cursor and dsh web/headless runners
+plugins/claude-workers/mcp/acp.mjs         ACP client
+plugins/claude-workers/mcp/codex.mjs       Codex app-server client and usage formatting
+plugins/claude-workers/mcp/stdio-rpc.mjs   JSON-RPC over a child process's stdio
+plugins/claude-workers/agents, commands, skills    Claude Code subagents, slash commands and the routing skill
 ```
 
 ## License

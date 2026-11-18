@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "workers": {
+      "command": "${CLAUDE_WORKERS_NODE:-node}",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/mcp/server.mjs"
+      ]
+    }
+  }
+}

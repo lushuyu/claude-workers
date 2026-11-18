@@ -43,7 +43,7 @@ export class AcpAgent {
     this.ready = rpc.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: 'dsh-mcp', version: '1' },
+      clientInfo: { name: 'claude-workers', version: '1' },
     }, 90000).then((r) => { this.caps = r?.agentCapabilities ?? {}; this.info = r?.agentInfo ?? null; return r; });
     this.ready.catch(() => { rpc.kill(); });
     return this.ready;

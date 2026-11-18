@@ -39,7 +39,7 @@ export class CodexServer {
         this.sinks.clear();
       },
     });
-    this.ready = rpc.request('initialize', { clientInfo: { name: 'dsh-mcp', title: 'dsh MCP', version: '1' } }, 60000)
+    this.ready = rpc.request('initialize', { clientInfo: { name: 'claude-workers', title: 'Claude Workers', version: '1' } }, 60000)
       .then((r) => { rpc.notify('initialized', {}); return r; });
     this.ready.catch(() => { rpc.kill(); });
     return this.ready;

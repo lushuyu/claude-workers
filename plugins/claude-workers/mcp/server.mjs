@@ -1,23 +1,23 @@
 #!/usr/bin/env node
-// dsh MCP server: hands coding tasks to a worker agent and reports back.
+// claude-workers MCP server: hands coding tasks to a worker agent and reports back.
 // Zero dependencies; MCP over stdio (newline-delimited JSON-RPC 2.0).
 //
-// Harnesses are configured in ~/.dsh-mcp/config.json (see "harness registry" below and
+// Harnesses are configured in ~/.claude-workers/config.json (see "harness registry" below and
 // config.example.json): the built-in ones are cursor, deepseek, codex and opencode, and any ACP
 // agent can be added by name with its own model. deepseek (over ACP, mcp/acp.mjs), codex (the
 // Codex app-server, mcp/codex.mjs) and other ACP agents run in long-lived processes and stream
 // what they do: text and tool calls go out as MCP progress notifications while the tool call
-// waits, and each report lists the activity since the previous one. dsh_usage reads plan usage
+// waits, and each report lists the activity since the previous one. worker_usage reads plan usage
 // (Codex rate-limit windows and credits from its app-server, Cursor's pools).
 //
 // engine=auto (the default) picks Cursor while the Cursor plan keeps at least
-// DSH_MCP_CURSOR_MIN_LEFT percent (30) of the pool its model draws on, DeepSeek otherwise:
-// - cursor: the Cursor CLI (`agent -p`, model DSH_MCP_CURSOR_MODEL, default auto) in a
+// CLAUDE_WORKERS_CURSOR_MIN_LEFT percent (30) of the pool its model draws on, DeepSeek otherwise:
+// - cursor: the Cursor CLI (`agent -p`, model CLAUDE_WORKERS_CURSOR_MODEL, default auto) in a
 //   process of its own, with Cursor's auto-review: safe tool calls run, the rest are refused
 //   (headless Cursor cannot ask anyone) and the report lists them under BLOCKED. Quota comes
 //   from the CLI's own /usage screen (mcp/cursor-usage.py, a pty), re-read after every Cursor
 //   task and at least every 30 minutes; a run that hits the plan limit is handed to DeepSeek.
-//   Each run is appended to ~/.cursor/dsh-mcp/usage-YYYY-MM.jsonl with its tokens and the model
+//   Each run is appended to ~/.cursor/claude-workers/usage-YYYY-MM.jsonl with its tokens and the model
 //   Auto actually picked (read from the CLI's chat store), for usage dashboards to read.
 // - deepseek: DeepSeek Harness (dsh): over ACP by default (`dsh --profile acp`), or by one of
 //   the two older runners (runner=web|headless, or when continuing a session-… id):
@@ -30,25 +30,25 @@
 // - headless: `dsh headless --json` in a process of its own, when no web instance answers (or
 //   runner=headless). Its session still shows in the UI, under 未分组, but not live.
 //
-// Tools: dsh_run, dsh_wait, dsh_approve, dsh_cancel, dsh_jobs. A task outlives one tool call:
-// dsh_run returns a job id when its wait runs out, and the job keeps going until it finishes.
+// Tools: worker_run, worker_wait, worker_approve, worker_cancel, worker_jobs. A task outlives one tool call:
+// worker_run returns a job id when its wait runs out, and the job keeps going until it finishes.
 // A cancelled tool call (the user interrupting) stops its task.
 //
 // Web sessions are switched to dsh's Auto review permission preset (`/permission auto`) and to
-// the DSH_MCP_EFFORT reasoning effort before they get the task. Under Auto a model reviews
+// the CLAUDE_WORKERS_EFFORT reasoning effort before they get the task. Under Auto a model reviews
 // every tool call, and a call it rejects waits for a human approval. This server answers those
 // itself: while a web job runs it listens on the web instance's approval stream, and a request
-// for one of its sessions makes dsh_run / dsh_wait return at once with APPROVAL NEEDED, to be
-// answered with dsh_approve (the web UI can still answer it too). Auto needs the experimental
+// for one of its sessions makes worker_run / worker_wait return at once with APPROVAL NEEDED, to be
+// answered with worker_approve (the web UI can still answer it too). Auto needs the experimental
 // auto-review layer enabled in the web profile; headless has no Auto.
 //
-// Env: DSH_MCP_ENGINE (auto | cursor | deepseek), DSH_MCP_CURSOR_MODEL (auto),
-// DSH_MCP_CURSOR_MIN_LEFT (30), DSH_MCP_CURSOR_BIN (the agent launcher), DSH_MCP_RUNNER (auto |
-// web | headless, for DeepSeek), DSH_MCP_PERMISSION (preset for web sessions, default auto; empty
-// keeps the profile default), DSH_MCP_EFFORT (reasoning effort for web sessions, default max;
+// Env: CLAUDE_WORKERS_ENGINE (auto | cursor | deepseek), CLAUDE_WORKERS_CURSOR_MODEL (auto),
+// CLAUDE_WORKERS_CURSOR_MIN_LEFT (30), CLAUDE_WORKERS_CURSOR_BIN (the agent launcher), CLAUDE_WORKERS_RUNNER (auto |
+// web | headless, for DeepSeek), CLAUDE_WORKERS_PERMISSION (preset for web sessions, default auto; empty
+// keeps the profile default), CLAUDE_WORKERS_EFFORT (reasoning effort for web sessions, default max;
 // empty keeps the session's), DSH_WEB_BASE (http://127.0.0.1:3080), DSH_WEB_TOKEN_FILE (where the
-// web launch token is), DSH_MCP_DSH_HOME (the ~/.dsh the web instance writes; WSL points it at the
-// Windows one), DSH_BIN, DSH_WEB_URL, DSH_MCP_DEFAULT_WAIT.
+// web launch token is), CLAUDE_WORKERS_DSH_HOME (the ~/.dsh the web instance writes; WSL points it at the
+// Windows one), DSH_BIN, DSH_WEB_URL, CLAUDE_WORKERS_DEFAULT_WAIT.
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -60,7 +60,12 @@ import zlib from 'node:zlib';
 import { AcpAgent } from './acp.mjs';
 import { CodexServer, usageLine } from './codex.mjs';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
+// Names from before the rename (DSH_MCP_*, ~/.dsh-mcp, ~/.cursor/dsh-mcp) keep working.
+for (const [k, v] of Object.entries(process.env)) if (k.startsWith('DSH_MCP_')) process.env[`CLAUDE_WORKERS_${k.slice(8)}`] ??= v;
+const legacyDir = (now, old) => (!fs.existsSync(now) && fs.existsSync(old) ? old : now);
+const STATE_DIR = legacyDir(path.join(os.homedir(), '.claude-workers'), path.join(os.homedir(), '.dsh-mcp'));
+const CONFIG_FILE = process.env.CLAUDE_WORKERS_CONFIG || path.join(STATE_DIR, 'config.json');
 const isWin = process.platform === 'win32';
 const isWsl = process.platform === 'linux' && /microsoft/i.test(safeRead('/proc/version'));
 
@@ -68,26 +73,26 @@ const WEB_BASE = (process.env.DSH_WEB_BASE || 'http://127.0.0.1:3080').replace(/
 // Where a person opens dsh sessions: the web instance's address as they reach it (DSH_WEB_URL, or
 // "webUi" in the config file), else the local address this server talks to.
 const webUi = process.env.DSH_WEB_URL || (() => {
-  try { return JSON.parse(fs.readFileSync(process.env.DSH_MCP_CONFIG || path.join(os.homedir(), '.dsh-mcp', 'config.json'), 'utf8')).webUi; } catch { return null; }
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).webUi; } catch { return null; }
 })() || WEB_BASE;
-const DSH_HOME = process.env.DSH_MCP_DSH_HOME || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-const PERMISSION = (process.env.DSH_MCP_PERMISSION ?? 'auto').trim();
-const EFFORT = (process.env.DSH_MCP_EFFORT ?? 'max').trim();
-const ENGINE = (process.env.DSH_MCP_ENGINE || 'auto').trim();
-const CURSOR_MODEL = (process.env.DSH_MCP_CURSOR_MODEL || 'auto').trim();
-const CURSOR_MIN_LEFT = Number(process.env.DSH_MCP_CURSOR_MIN_LEFT ?? 30);
+const DSH_HOME = process.env.CLAUDE_WORKERS_DSH_HOME || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+const PERMISSION = (process.env.CLAUDE_WORKERS_PERMISSION ?? 'auto').trim();
+const EFFORT = (process.env.CLAUDE_WORKERS_EFFORT ?? 'max').trim();
+const ENGINE = (process.env.CLAUDE_WORKERS_ENGINE || 'auto').trim();
+const CURSOR_MODEL = (process.env.CLAUDE_WORKERS_CURSOR_MODEL || 'auto').trim();
+const CURSOR_MIN_LEFT = Number(process.env.CLAUDE_WORKERS_CURSOR_MIN_LEFT ?? 30);
 const CURSOR_HOME = path.join(os.homedir(), '.cursor');
-const CURSOR_STATE = path.join(CURSOR_HOME, 'dsh-mcp'); // quota reading + usage log
+const CURSOR_STATE = legacyDir(path.join(CURSOR_HOME, 'claude-workers'), path.join(CURSOR_HOME, 'dsh-mcp')); // quota reading + usage log
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-let defaultWait = Number(process.env.DSH_MCP_DEFAULT_WAIT) || 45;
+let defaultWait = Number(process.env.CLAUDE_WORKERS_DEFAULT_WAIT) || 45;
 const jobs = new Map();
 const inflight = new Map(); // JSON-RPC request id -> job id, so a cancelled call can stop its task
 let jobSeq = 0;
 
 function safeRead(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }
 function safeReaddir(p) { try { return fs.readdirSync(p); } catch { return []; } }
-function log(...a) { process.stderr.write('[dsh-mcp] ' + a.join(' ') + '\n'); }
+function log(...a) { process.stderr.write('[claude-workers] ' + a.join(' ') + '\n'); }
 function send(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
 
 function newJob(runner, cwd, task) {
@@ -96,8 +101,8 @@ function newJob(runner, cwd, task) {
     sessionId: null, workspace: null, final: null, lastText: null, errors: [], calls: [], failedCalls: 0,
     written: new Set(), stderr: '', exitCode: null, listeners: new Set(), wake: new Set(),
     permission: null, model: null, approvals: new Map(), approvalLog: [],
-    pending: new Map(), // approval-stream eventId -> approval request held for dsh_approve
-    answered: new Set(), // callIds whose approval dsh_approve answered
+    pending: new Map(), // approval-stream eventId -> approval request held for worker_approve
+    answered: new Set(), // callIds whose approval worker_approve answered
     callInputs: new Map(), // dsh tool callId -> { tool, input }, to show what an approval is for
     feed: [], feedSeen: 0, // what happened, in order (text lines and tool calls); reports show what is new
     textBuf: '', textTimer: null, msgKey: null, msgText: '',
@@ -298,7 +303,7 @@ function ingest(job, records) {
     } else if (r.type === 'approval/decided') {
       const asked = job.approvals.get(d.id);
       job.approvals.delete(d.id);
-      const by = asked?.callId && job.answered.has(asked.callId) ? ' by dsh_approve' : '';
+      const by = asked?.callId && job.answered.has(asked.callId) ? ' by worker_approve' : '';
       job.approvalLog.push(`${d.outcome}${by}: ${asked ? describeApproval(job, asked) : d.id}${asked?.reason ? `\n      reviewer: ${asked.reason}` : ''}`);
     }
     else if (r.type === 'assistant/message') {
@@ -336,7 +341,7 @@ async function startWebJob({ task, cwd, session_id }) {
 // Switch a session to the PERMISSION preset the way the web UI's /permission picker does.
 // Works on cold sessions too; reports what the session actually runs under.
 async function setPermission(sessionId) {
-  if (!PERMISSION) return 'profile default (DSH_MCP_PERMISSION is empty)';
+  if (!PERMISSION) return 'profile default (CLAUDE_WORKERS_PERMISSION is empty)';
   try {
     const v = await webCall('commands/execute', { agentId: sessionId, line: `/permission ${PERMISSION}`, submittedAttachments: [] });
     if (v?.result?.kind === 'success') return PERMISSION === 'auto' ? 'Auto review (the model reviews each tool call; a call it rejects waits for your approval in the web UI)' : PERMISSION;
@@ -368,7 +373,7 @@ async function setEffort(sessionId) {
 // the /api/remote.mux WebSocket carries an Agent-scoped `approval/request` waterfall to every
 // answering client (the login cookie makes this server one, like a browser tab), and the first
 // `$events/result` answer settles it; the others get a `cancel`. While web jobs run, this keeps
-// the stream open. Requests for their sessions are held for dsh_approve; anything else is
+// the stream open. Requests for their sessions are held for worker_approve; anything else is
 // answered `next`, as the web client does for sessions it does not handle, so the other
 // clients decide. Pending requests are replayed to a client that (re)connects.
 const events = { ws: null, clientId: null, gen: 0, retry: null };
@@ -376,7 +381,7 @@ const runningWebJobs = () => [...jobs.values()].filter((j) => j.runner === 'web'
 
 async function ensureEvents() {
   if (events.ws || events.retry || typeof WebSocket !== 'function' || !runningWebJobs().length) return;
-  const stream = `dsh-mcp-${++events.gen}`;
+  const stream = `claude-workers-${++events.gen}`;
   let ws;
   try {
     if (!webCookie) await webLogin();
@@ -516,7 +521,7 @@ function startHeadlessJob({ task, cwd, session_id }) {
 // bundled node.exe with index.js, so that is started directly: no cmd.exe quoting of the task.
 const cursorVersionKey = (name) => Number(name.split('-')[0].split('.').map((p) => p.padStart(2, '0')).join(''));
 function cursorCommand() {
-  if (process.env.DSH_MCP_CURSOR_BIN) return { cmd: process.env.DSH_MCP_CURSOR_BIN, pre: [], env: {}, probe: process.env.DSH_MCP_CURSOR_BIN };
+  if (process.env.CLAUDE_WORKERS_CURSOR_BIN) return { cmd: process.env.CLAUDE_WORKERS_CURSOR_BIN, pre: [], env: {}, probe: process.env.CLAUDE_WORKERS_CURSOR_BIN };
   if (isWin) {
     const home = path.join(process.env.LOCALAPPDATA || '', 'cursor-agent');
     const v = safeReaddir(path.join(home, 'versions'))
@@ -542,7 +547,7 @@ function cursorCommand() {
 // its git calls itself, but leaves GIT_CONFIG_GLOBAL alone.
 function cursorGitConfig() {
   const file = path.join(CURSOR_STATE, 'gitconfig');
-  const body = '# Git config for Cursor CLI runs started by the dsh MCP server (GIT_CONFIG_GLOBAL).\n'
+  const body = '# Git config for Cursor CLI runs started by the claude-workers MCP server (GIT_CONFIG_GLOBAL).\n'
     + '# Cursor installs the account\'s plugins from SSH GitHub URLs; they are public, so HTTPS needs no key.\n'
     + '[include]\n\tpath = ~/.gitconfig\n[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n';
   try {
@@ -718,7 +723,7 @@ function afterCursorJob(job) {
 
 // ---------------------------------------------------------------- harness registry
 // Which harnesses exist and which model each one uses is configuration, not code:
-// ~/.dsh-mcp/config.json (or DSH_MCP_CONFIG), re-read when it changes.
+// ~/.claude-workers/config.json (or CLAUDE_WORKERS_CONFIG), re-read when it changes.
 //   { "default": "auto", "webUi": "https://my-host.example/",
 //     "harnesses": {
 //       "deepseek": { "runner": "acp", "model": "soclaas/x-test-2", "effort": "max" },
@@ -727,15 +732,13 @@ function afterCursorJob(job) {
 //       "mine":     { "type": "acp", "command": "some-agent", "args": ["acp"], "env": {}, "model": "...", "options": {} },
 //       "cursor":   { "disabled": true } } }
 // "approvals" per harness says who decides a tool call that needs approval: "claude" (it comes
-// back as APPROVAL NEEDED for dsh_approve) or "self" (the harness's own reviewer model). Only
+// back as APPROVAL NEEDED for worker_approve) or "self" (the harness's own reviewer model). Only
 // harnesses that have a reviewer can be "self": Codex (auto-review) and dsh's web runner (Auto
 // review); everything else always asks Claude. Default: "self" for Codex on a ChatGPT
 // subscription login, "claude" for the rest.
 // A harness with no "model" uses whatever model the harness itself defaults to.
 // Types: dsh (DeepSeek Harness: acp | web | headless runners), acp (any ACP agent on stdio),
 // codex (the Codex app-server), cursor (the Cursor CLI). The four built-ins below need no entry.
-const STATE_DIR = path.join(os.homedir(), '.dsh-mcp');
-const CONFIG_FILE = process.env.DSH_MCP_CONFIG || path.join(STATE_DIR, 'config.json');
 let configCache = { mtime: -1, value: {} };
 function loadConfig() {
   let mtime = 0; try { mtime = fs.statSync(CONFIG_FILE).mtimeMs; } catch {}
@@ -750,7 +753,7 @@ function harnesses() {
   const user = loadConfig().harnesses ?? {};
   const base = {
     cursor: { type: 'cursor', model: CURSOR_MODEL },
-    deepseek: { type: 'dsh', runner: process.env.DSH_MCP_RUNNER || 'auto', model: process.env.DSH_MCP_MODEL || undefined, effort: EFFORT },
+    deepseek: { type: 'dsh', runner: process.env.CLAUDE_WORKERS_RUNNER || 'auto', model: process.env.CLAUDE_WORKERS_MODEL || undefined, effort: EFFORT },
     codex: { type: 'codex' },
     opencode: { type: 'acp', command: 'opencode', args: ['acp'] },
   };
@@ -813,7 +816,7 @@ function harnessMissing(h) {
   return launchSpec(h) ? null : `\`${h.command ?? 'codex'}\` is not installed on this host`;
 }
 
-// Which harness owns a session id, so dsh_run(session_id) continues on it after a restart too.
+// Which harness owns a session id, so worker_run(session_id) continues on it after a restart too.
 const SESSIONS_FILE = path.join(STATE_DIR, 'sessions.json');
 function readSessions() { try { return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8')); } catch { return {}; } }
 function rememberSession(id, harness, runner) {
@@ -825,7 +828,7 @@ function rememberSession(id, harness, runner) {
   } catch (e) { log('could not write', SESSIONS_FILE, e.message); }
 }
 
-// A permission request held for dsh_approve. `answer(allow)` settles it with the harness.
+// A permission request held for worker_approve. `answer(allow)` settles it with the harness.
 let approvalSeq = 0;
 function holdApproval(job, { toolName, callId, reason, answer }) {
   const a = { id: `apr-${++approvalSeq}`, toolName, callId, reason: reason ?? null, reported: false, answer };
@@ -994,7 +997,7 @@ async function startCodexJob(name, h, { task, cwd, session_id, model }, why) {
     job.sessionId = t.threadId;
     job.model = `${t.model ?? 'the Codex config default'}, reasoning ${h.effort ?? t.effort ?? 'config default'}`;
     job.permission = `Codex sandbox ${t.sandbox ?? 'per ~/.codex/config.toml'}, approval policy ${t.approval ?? 'per config'}, ` + (t.reviewer && t.reviewer !== 'user'
-      ? `approvals decided by Codex's own auto-review ("approvals": "claude" for this harness sends them to dsh_approve instead)`
+      ? `approvals decided by Codex's own auto-review ("approvals": "claude" for this harness sends them to worker_approve instead)`
       : 'approval requests return as APPROVAL NEEDED');
     rememberSession(t.threadId, name, 'codex');
     job.cancel = () => srv.interrupt(t.threadId, job.turnId);
@@ -1061,9 +1064,9 @@ function report(job) {
   const cursor = job.runner === 'cursor', codex = job.runner === 'codex', acp = job.runner === 'acp';
   const dsh = !cursor && !codex && (!acp || job.harnessType === 'dsh');
   const who = cursor ? 'Cursor' : codex ? 'Codex' : dsh ? 'DeepSeek' : job.harness;
-  const where = cursor ? 'Cursor CLI, headless (continue the chat with dsh_run session_id)'
-    : codex ? 'Codex app-server, streamed (continue the thread with dsh_run session_id)'
-      : acp ? `ACP, streamed from a long-lived ${dsh ? 'dsh' : job.harness} agent process (continue with dsh_run session_id)`
+  const where = cursor ? 'Cursor CLI, headless (continue the chat with worker_run session_id)'
+    : codex ? 'Codex app-server, streamed (continue the thread with worker_run session_id)'
+      : acp ? `ACP, streamed from a long-lived ${dsh ? 'dsh' : job.harness} agent process (continue with worker_run session_id)`
         : job.runner === 'web' ? `web instance (live in ${webUi}, workspace "${job.workspace}")`
           : `headless (the session appears under 未分组 in ${webUi}, not live)`;
   const lines = [
@@ -1100,11 +1103,11 @@ function report(job) {
         lines.push(`APPROVAL NEEDED (approval_id ${a.id}): ${describeApproval(job, a)}`);
         if (a.reason) lines.push(`  reviewer: ${a.reason}`);
       }
-      lines.push(`${who} is paused until this is answered: dsh_approve(job_id "${job.id}", decision allow|reject)${job.runner === 'web' ? `, or the user answers in ${webUi}` : ''}.`);
+      lines.push(`${who} is paused until this is answered: worker_approve(job_id "${job.id}", decision allow|reject)${job.runner === 'web' ? `, or the user answers in ${webUi}` : ''}.`);
     } else {
       // Seen only in the session log: the approval stream did not deliver it (yet).
       for (const a of job.approvals.values()) if (!viaStream(job, a)) lines.push(`WAITING FOR THE USER: approve or reject "${a.toolName}" in ${webUi}${a.reason ? ` (reviewer: ${a.reason})` : ''}`);
-      lines.push(`still running: call dsh_wait with job_id "${job.id}" (or dsh_cancel).`);
+      lines.push(`still running: call worker_wait with job_id "${job.id}" (or worker_cancel).`);
     }
     // What happened since the last report on this job: the worker's text (») and tool calls (·).
     const fresh = job.feed.slice(job.feedSeen);
@@ -1137,18 +1140,18 @@ function engineList() {
 }
 const tools = () => [
   {
-    name: 'dsh_run',
+    name: 'worker_run',
     description: 'Hand a coding/research task to a worker agent and get its result. engine=auto (default) uses Cursor (the Cursor CLI in its Auto model mode) '
       + `while the Cursor plan keeps at least ${CURSOR_MIN_LEFT}% of its pool, and DeepSeek Harness otherwise (with the model configured for it); `
       + `engine=<name> forces one of the configured harnesses: ${engineList().join('; ')}. The result says which engine ran and why. `
       + 'While the worker runs, its text and tool calls are streamed as progress, and every report lists the activity since the previous one. '
-      + 'Codex and ACP harnesses pause on a call that needs approval the same way DeepSeek does (APPROVAL NEEDED, answered with dsh_approve). '
+      + 'Codex and ACP harnesses pause on a call that needs approval the same way DeepSeek does (APPROVAL NEEDED, answered with worker_approve). '
       + 'The worker works inside `cwd` with its own file and shell tools and returns a final message; review its changes yourself afterwards. '
       + 'Give a self-contained spec: goal, files it may touch, files it must not touch, acceptance commands. '
       + 'Cursor runs with its auto-review: safe tool calls run, the rest are refused and listed under BLOCKED (run one yourself only if the task needs it and the user agrees). '
       + 'DeepSeek runs in the machine\'s dsh web instance when one is up (live in that web UI), otherwise headless; web sessions use dsh\'s Auto review at maximum reasoning effort, '
-      + 'and when its reviewer rejects a call, DeepSeek pauses and this returns at once with APPROVAL NEEDED (the command, the reviewer\'s reason, an approval_id): answer it with dsh_approve. '
-      + 'Waits up to wait_seconds; if still running, returns a job_id for dsh_wait. Pass session_id to continue an earlier session (a Cursor chat id, or a dsh session-… id).',
+      + 'and when its reviewer rejects a call, DeepSeek pauses and this returns at once with APPROVAL NEEDED (the command, the reviewer\'s reason, an approval_id): answer it with worker_approve. '
+      + 'Waits up to wait_seconds; if still running, returns a job_id for worker_wait. Pass session_id to continue an earlier session (a Cursor chat id, or a dsh session-… id).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1166,8 +1169,8 @@ const tools = () => [
     annotations: { title: 'Run a worker task (Cursor / DeepSeek)', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
-    name: 'dsh_wait',
-    description: 'Keep waiting for a running job started by dsh_run, then report its status and final message.',
+    name: 'worker_wait',
+    description: 'Keep waiting for a running job started by worker_run, then report its status and final message.',
     inputSchema: {
       type: 'object',
       properties: { job_id: { type: 'string' }, wait_seconds: { type: 'integer', minimum: 1, maximum: 3000 } },
@@ -1177,11 +1180,11 @@ const tools = () => [
     annotations: { title: 'Wait for a worker job', readOnlyHint: true, openWorldHint: false },
   },
   {
-    name: 'dsh_approve',
-    description: 'Answer an APPROVAL NEEDED request from a dsh_run / dsh_wait result: the worker (DeepSeek, Codex or an ACP harness) wants to run a tool call that needs a decision and waits for it. '
+    name: 'worker_approve',
+    description: 'Answer an APPROVAL NEEDED request from a worker_run / worker_wait result: the worker (DeepSeek, Codex or an ACP harness) wants to run a tool call that needs a decision and waits for it. '
       + 'allow runs that one call once; reject refuses it and the worker carries on without it. Decide as the user would: allow what the task clearly needs and what stays inside its project; '
       + 'reject what the task does not need or what reaches outside it (deleting or overwriting data outside cwd, git push, deploying, system-wide installs, sending data off the machine, touching credentials). '
-      + 'If you cannot tell, ask the user first. Afterwards keeps waiting like dsh_wait.',
+      + 'If you cannot tell, ask the user first. Afterwards keeps waiting like worker_wait.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1196,19 +1199,19 @@ const tools = () => [
     annotations: { title: 'Answer a DeepSeek approval', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   {
-    name: 'dsh_cancel',
-    description: 'Stop a running worker job. Its session stays and can be continued with dsh_run(session_id).',
+    name: 'worker_cancel',
+    description: 'Stop a running worker job. Its session stays and can be continued with worker_run(session_id).',
     inputSchema: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'], additionalProperties: false },
     annotations: { title: 'Cancel a worker job', destructiveHint: true, openWorldHint: false },
   },
   {
-    name: 'dsh_jobs',
+    name: 'worker_jobs',
     description: 'List worker jobs started in this session with their status, engine/runner and session ids, and the current Cursor quota.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     annotations: { title: 'List worker jobs', readOnlyHint: true, openWorldHint: false },
   },
   {
-    name: 'dsh_usage',
+    name: 'worker_usage',
     description: 'Plan usage of the worker harnesses: for Codex on a ChatGPT subscription the rate-limit windows (5h, weekly: percent used, reset time), the remaining credit balance '
       + 'and the rate-limit reset credits, read live from the Codex app-server; for Cursor the plan pools (refresh=true re-reads them, which takes about half a minute). '
       + 'Harnesses without a plan quota (DeepSeek Harness, other ACP agents) are listed with their model.',
@@ -1283,7 +1286,7 @@ async function waitJob(job, seconds, progress, bind) {
 async function callTool(name, args, progress, bind) {
   const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
   const wait = (v) => Math.min(3000, Math.max(1, Number(v) || defaultWait));
-  if (name === 'dsh_run') {
+  if (name === 'worker_run') {
     if (typeof args.task !== 'string' || !args.task.trim()) return text('task is required', true);
     const bad = checkCwd(args.cwd);
     if (bad) return text(bad, true);
@@ -1293,7 +1296,7 @@ async function callTool(name, args, progress, bind) {
     // from the id (dsh web/headless ids start with "session-", OpenCode's with "ses_").
     const owner = args.session_id && (readSessions()[args.session_id]?.harness
       ?? (args.session_id.startsWith('session-') ? 'deepseek' : args.session_id.startsWith('ses_') ? 'opencode' : 'cursor'));
-    const fallback = process.env.DSH_MCP_ENGINE || loadConfig().default || 'auto';
+    const fallback = process.env.CLAUDE_WORKERS_ENGINE || loadConfig().default || 'auto';
     const want = args.engine || owner || fallback;
     if (want !== 'auto' && !hs[want]) return text(`unknown engine "${want}". Configured here: auto, ${Object.keys(hs).join(', ')} (harnesses are set in ${CONFIG_FILE})`, true);
     const h = hs[want];
@@ -1317,14 +1320,14 @@ async function callTool(name, args, progress, bind) {
     job = await waitJob(job, wait(args.wait_seconds), progress, bind);
     return text(report(job), job.status === 'failed');
   }
-  if (name === 'dsh_wait') {
+  if (name === 'worker_wait') {
     let job = jobs.get(args.job_id);
     if (!job) return text(`no such job: ${args.job_id} (jobs live only as long as this MCP server; the session itself persists)`, true);
     bind(job);
     job = await waitJob(job, wait(args.wait_seconds), progress, bind);
     return text(report(job), job.status === 'failed');
   }
-  if (name === 'dsh_approve') {
+  if (name === 'worker_approve') {
     const job = jobs.get(args.job_id);
     if (!job) return text(`no such job: ${args.job_id}`, true);
     if (!['allow', 'reject'].includes(args.decision)) return text('decision must be allow or reject', true);
@@ -1339,31 +1342,31 @@ async function callTool(name, args, progress, bind) {
     if (a.answer) { // held by this server for an ACP or Codex harness
       a.answer(args.decision === 'allow');
       job.pending.delete(a.id);
-      job.approvalLog.push(`${value} by dsh_approve: ${describeApproval(job, a)}${a.reason ? `\n      reason given: ${a.reason}` : ''}`);
+      job.approvalLog.push(`${value} by worker_approve: ${describeApproval(job, a)}${a.reason ? `\n      reason given: ${a.reason}` : ''}`);
     } else {
       try { await answerEvent(a.id, { kind: 'result', value }); }
       catch (e) { return text(`could not answer (${e.message}); the user can answer in ${webUi}`, true); }
       job.pending.delete(a.id);
       if (a.callId) job.answered.add(a.callId); // the session log's approval/decided records the outcome
-      else job.approvalLog.push(`${value} by dsh_approve: ${describeApproval(job, a)}`);
+      else job.approvalLog.push(`${value} by worker_approve: ${describeApproval(job, a)}`);
     }
     bind(job);
     await waitFor(job, wait(args.wait_seconds), progress);
     return text(report(job), job.status === 'failed');
   }
-  if (name === 'dsh_cancel') {
+  if (name === 'worker_cancel') {
     const job = jobs.get(args.job_id);
     if (!job) return text(`no such job: ${args.job_id}`, true);
-    await stopJob(job, 'dsh_cancel');
+    await stopJob(job, 'worker_cancel');
     return text(report(job));
   }
-  if (name === 'dsh_jobs') {
+  if (name === 'worker_jobs') {
     const quota = cursorCommand() ? `Cursor quota: ${quotaLine(readQuota(), CURSOR_MODEL)}` : 'Cursor CLI: not installed on this host';
     if (!jobs.size) return text(`no worker jobs in this session\n${quota}`);
     return text([...jobs.values()].map((j) => `${j.id}  ${j.status}  ${j.harness ? `${j.harness}/` : ''}${j.runner}  session=${j.sessionId || '-'}  cwd=${j.cwd}  calls=${j.calls.length}`
-      + (j.pending.size ? `  APPROVAL NEEDED ×${j.pending.size}` : '') + (j.fallbackId ? `  -> ${j.fallbackId}` : '')).join('\n') + `\n${quota}\n(dsh_usage shows every harness's plan usage)`);
+      + (j.pending.size ? `  APPROVAL NEEDED ×${j.pending.size}` : '') + (j.fallbackId ? `  -> ${j.fallbackId}` : '')).join('\n') + `\n${quota}\n(worker_usage shows every harness's plan usage)`);
   }
-  if (name === 'dsh_usage') return text(await usageReport(args.refresh === true));
+  if (name === 'worker_usage') return text(await usageReport(args.refresh === true));
   return text(`unknown tool: ${name}`, true);
 }
 
@@ -1372,15 +1375,15 @@ async function handle(msg) {
   const { id, method, params = {} } = msg;
   if (method === 'initialize') {
     const client = String(params.clientInfo?.name || '');
-    if (!process.env.DSH_MCP_DEFAULT_WAIT && /claude-code|claude code/i.test(client)) defaultWait = 540;
+    if (!process.env.CLAUDE_WORKERS_DEFAULT_WAIT && /claude-code|claude code/i.test(client)) defaultWait = 540;
     log(`client=${client || '?'} wait=${defaultWait}s web=${WEB_BASE} token=${webTokenFile()} dsh_home=${DSH_HOME} headless=${dshCommand().cmd}`);
     return send({ jsonrpc: '2.0', id, result: {
       protocolVersion: params.protocolVersion || '2025-06-18',
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'dsh', title: 'DeepSeek Harness', version: VERSION },
-      instructions: 'Use these tools only when the user asks to hand work to a worker (Cursor, DeepSeek / dsh, Codex, OpenCode or another configured harness). dsh_run hands a task to Cursor while its plan has quota, '
+      serverInfo: { name: 'claude-workers', title: 'Claude Workers', version: VERSION },
+      instructions: 'Use these tools only when the user asks to hand work to a worker (Cursor, DeepSeek / dsh, Codex, OpenCode or another configured harness). worker_run hands a task to Cursor while its plan has quota, '
         + 'DeepSeek otherwise, or to the harness named in `engine`; review the resulting changes yourself before reporting them. A result saying APPROVAL NEEDED means the worker is paused on a tool call that needs a decision: '
-        + 'answer it with dsh_approve (ask the user when you cannot tell whether the task needs it). BLOCKED lists Cursor tool calls its auto-review refused. dsh_usage shows plan usage (Codex limits and credits, Cursor pools).',
+        + 'answer it with worker_approve (ask the user when you cannot tell whether the task needs it). BLOCKED lists Cursor tool calls its auto-review refused. worker_usage shows plan usage (Codex limits and credits, Cursor pools).',
     } });
   }
   if (method === 'notifications/cancelled') {
@@ -1399,7 +1402,7 @@ async function handle(msg) {
       const result = await callTool(params.name, params.arguments || {}, progress, (job) => inflight.set(id, job.id));
       return send({ jsonrpc: '2.0', id, result });
     } catch (err) {
-      return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `dsh-mcp error: ${err.message}` }], isError: true } });
+      return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `claude-workers error: ${err.message}` }], isError: true } });
     } finally { inflight.delete(id); }
   }
   if (id !== undefined && method) send({ jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } });
